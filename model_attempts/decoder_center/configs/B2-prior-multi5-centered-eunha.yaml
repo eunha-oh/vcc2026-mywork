@@ -1,0 +1,178 @@
+# multi5 (submit-B2-prior-multi5-1004, 10/10 제출 0.1319 의 학습 설정) + 학습 중 디코더 출력 중심화. docs/decoder_center_eunha.md 참고.
+# 바탕: ${VCC_DATA_ROOT}/derived/txpert-train-1004/local_backup_1010/train/submit-B2-prior-multi5-1004/config.yaml
+# 0.1319 학습과 다른 점: model.factory 를 model_adapters.txpert_centered 로, data.factory 를 data_adapters.decoder_center_data 로
+#   (inputs 에 dataset_id 와 측정 마스크를 넣는다), losses.factory 를 training.centered_objective 로 (디코더 공통 성분 벌점을 더한다),
+#   model.decoder_center 를 추가. prior 는 원본 prior_table_3lines.npz (B 변환 아님).
+# 운영 설정: ${VCC_*} 를 공유 storage 경로로 고정, counts_cache (h1 은 Studio 경로), wandb offline, output 은 Studio 경로.
+# 로스(state, PDS, DE-MMD)와 가중치, panel 16, step 2000, seed 20260901 은 사본 그대로.
+# 실행: scripts/run_centered.sh
+data:
+  factory: data_adapters.decoder_center_data:build_data
+  base_factory: data_adapters.multi:build_data
+  pert_prior:
+    path: ${VCC_DATA_ROOT}/derived/txpert-train-1004/data/prior_table_3lines.npz
+    min_cells: 16
+    exclude_lines:
+      k562:
+      - replogle_k562_gwps
+      hct116:
+      - orion_hct116
+      hek293t:
+      - orion_hek293t
+  validation_cells_per_condition: 64
+  minimum_train_cells_per_condition: 16
+  minimum_validation_cells_per_condition: 16
+  min_cells_per_condition: 32
+  sparse_perturbation_policy: adaptive
+  cell_set_len: 16
+  loading_mode: backed
+  loading_chunk_rows: 256
+  prepare_gene_embeddings: true
+  counts_target_sum: 10000.0
+  shared_controls_per_panel: true
+  evaluation_repeats: 1
+  key_mode: composite
+  missing_perturbation_embeddings: drop
+  gene_axis_csv: ${VCC_DATA_ROOT}/vcc2026/gene_names.csv
+  axis_reference_h5ad: ${VCC_DATA_ROOT}/adata_Training.h5ad
+  gene_embeddings:
+    cache_path: ${VCC_DATA_ROOT}/state/ESM2_pert_features.pt
+    expected_sha256: a210e1cc7901513999b2bca3836ba9e2f203cd008be4e9a9d6412a2267de9748
+    source_embedding_dim: 5120
+    projection_dim: 64
+    projection_seed: 20260902
+    projection_chunk_size: 512
+    perturbation_aliases:
+      TAZ: TAFAZZIN
+    imputation_cells_per_condition: 16
+    perturbation_aliases_csv: configs/gwps_esm2_symbol_aliases.csv
+  datasets:
+  - name: k562
+    adapter: perturbseq_dense
+    path: ${VCC_DATA_ROOT}/derived/txpert-train-1004/data/k562_train.h5ad
+    counts_cache: ${VCC_DATA_ROOT}/derived/de-gate-eunha/count_cache_multi5/k562
+    target_column: gene_target
+    cell_line: K562
+    role: both
+    thin_rate: null
+    seed: 0
+  - name: hct116
+    adapter: perturbseq_dense
+    path: ${VCC_DATA_ROOT}/derived/txpert-train-1004/data/orion_hct116_train.h5ad
+    counts_cache: ${VCC_DATA_ROOT}/derived/de-gate-eunha/count_cache_multi5/hct116
+    target_column: gene_target
+    cell_line: HCT116
+    role: both
+    thin_rate: null
+    seed: 0
+  - name: hek293t
+    adapter: perturbseq_dense
+    path: ${VCC_DATA_ROOT}/derived/txpert-train-1004/data/orion_hek293t_train.h5ad
+    counts_cache: ${VCC_DATA_ROOT}/derived/de-gate-eunha/count_cache_multi5/hek293t
+    target_column: gene_target
+    cell_line: HEK293T
+    role: both
+    thin_rate: null
+    seed: 0
+  - name: ipsc
+    adapter: perturbseq_dense
+    path: ${VCC_DATA_ROOT}/derived/txpert-train-1004/data/ipsc_train.h5ad
+    counts_cache: ${VCC_DATA_ROOT}/derived/de-gate-eunha/count_cache_multi5/ipsc
+    target_column: gene_target
+    cell_line: iPSC
+    role: both
+    thin_rate: null
+    seed: 0
+  - name: h1
+    adapter: vcc_h1
+    path: ${VCC_DATA_ROOT}/adata_Training.h5ad
+    counts_cache: ${WORKDIR}/runs/beta0_scale_eunha/count_cache/h1
+    cell_line: H1
+    role: both
+    thin_rate: 0.373
+    seed: 0
+model:
+  factory: model_adapters.txpert_centered:build_model
+  decoder_center:
+    enabled: true
+    min_targets: 4
+    log_interval: 400
+    common_weight: 10.0
+  latent_dim: 64
+  hidden_dim: 512
+  dropout: 0.1
+  counts_target_sum: 10000.0
+  esm2_cache: ${VCC_DATA_ROOT}/state/ESM2_pert_features.pt
+  esm2_sha256: a210e1cc7901513999b2bca3836ba9e2f203cd008be4e9a9d6412a2267de9748
+  gene_aliases:
+    TAZ: TAFAZZIN
+  graph_dir: ${VCC_DATA_ROOT}/derived/txpert-cache/gene_graphs_v1
+  graph: string_top20
+  pert_prior: true
+  pert_prior_gain_init: 1.0
+  pert_prior_gain_trainable: true
+losses:
+  state:
+    weight: 0.01
+    space: raw_counts
+  pds_contrastive:
+    weight: 0.5
+    start_step: 0
+    warmup_steps: 0
+    temperature: 0.1
+    counts_target_sum: 10000.0
+    space: bulk_lognorm
+    bulk_target_sum: 50000.0
+  de_mmd:
+    weight: 4.0
+    start_step: 0
+    warmup_steps: 0
+    fdr_threshold: 0.05
+    minimum_abs_lfc: 0.25
+    lfc_epsilon: 0.001
+    significance_temperature: 0.1
+    direction_temperature: 0.25
+    gene_embedding_scale: 1.0
+    state_scale: 1.0
+    magnitude_scale: 0.25
+    magnitude_clip: 5.0
+    kernel_bandwidths:
+    - 0.5
+    - 1.0
+    - 2.0
+    - 4.0
+    rff_features_per_bandwidth: 16
+    rff_seed: 20260903
+    class_mass_weight: 1.0
+  factory: training.centered_objective:build_objective
+training:
+  seed: 20260901
+  steps: 2000
+  evaluation_interval: 1000
+  panel_size: 16
+  gradient_accumulation_steps: 4
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  gradient_clip_norm: 10.0
+  device: auto
+  save_final_checkpoint: true
+  prefetch_batches: 2
+  checkpoint_interval: 1000
+  matmul_precision: highest
+  wandb:
+    mode: offline
+    project: virtual-cell-challenge-kubig
+    entity: KUBIG-VCC
+    group: submission
+evaluation:
+  factory: evaluation.vcc2026:build_evaluator
+  enabled: false
+  interval: 400
+  de_backend: pdex
+  device: cpu
+  num_threads: 4
+  integerization: stochastic_round
+  integerization_seed: 20260905
+output:
+  root: ${WORKDIR}/runs/centered_eunha
+  experiment: multi5-centered-eunha

@@ -1,0 +1,157 @@
+# L_SHRINK을 팀 프레임워크의 training/objective.py(JointObjective)에 연결한 변경분.
+# 팀 파일이라 전체는 넣지 않고 내가 바꾼 부분만 남겼다. 원본은 팀 저장소 PR #27.
+diff --git a/scripts/training/objective.py b/scripts/training/objective.py
+--- a/scripts/training/objective.py
++++ b/scripts/training/objective.py
+@@ -5,7 +5,8 @@
+ import numpy as np
+ import torch
+ from geomloss import SamplesLoss
+-from .losses import GeneEmbeddingDEMMDLoss, build_de_state_reference, pds_reference_bank_contrastive_loss, measured_mask
++from .losses import (GeneEmbeddingDEMMDLoss, build_de_state_reference, de_shrink_loss,
++                     pds_reference_bank_contrastive_loss, measured_mask)
+ from .reference_math import LogPool, pool_mean, pool_sum
+ 
+ 
+@@ -30,6 +31,7 @@ def _ramped_weight(final_weight: float, start_step: int, warmup_steps: int, step
+ def loss_weights_at_step(config: dict[str, Any], step: int) -> dict[str, float]:
+     pds_cfg = config["losses"]["pds_contrastive"]
+     de_cfg = config["losses"]["de_mmd"]
++    shrink_cfg = config["losses"].get("de_shrink", {"weight": 0.0})
+     return {
+         "state": float(config["losses"]["state"]["weight"]),
+         "pds": _ramped_weight(
+@@ -44,6 +46,12 @@ def loss_weights_at_step(config: dict[str, Any], step: int) -> dict[str, float]:
+             int(de_cfg.get("warmup_steps", 0)),
+             step,
+         ),
++        "de_shrink": _ramped_weight(
++            float(shrink_cfg.get("weight", 0.0)),
++            int(shrink_cfg.get("start_step", 0)),
++            int(shrink_cfg.get("warmup_steps", 0)),
++            step,
++        ),
+     }
+ 
+ 
+@@ -95,7 +103,7 @@ def bulk(pool):
+ 
+ 
+ class _References(torch.nn.Module):
+-    def __init__(self, group, target_sum, pds_cfg, de_cfg):
++    def __init__(self, group, target_sum, pds_cfg, de_cfg, need_de_reference=False):
+         super().__init__()
+         _require_counts(group.get("units", "raw_counts"), "JointObjective references")
+         self.labels = {name: i for i, name in enumerate(group["conditions"])}
+@@ -115,7 +123,8 @@ def __init__(self, group, target_sum, pds_cfg, de_cfg):
+             else:
+                 effects = build_pds_effect_reference(pools, group["control_label"], group["conditions"], **reference_args)
+             self.register_buffer("effects", torch.from_numpy(np.stack([effects[n] for n in group["conditions"]])))
+-        if float(de_cfg.get("weight", 0)):
++        # de_shrink는 DE 참조의 유의 gene 집합을 쓰므로, de_mmd weight가 0이어도 만든다.
++        if float(de_cfg.get("weight", 0)) or need_de_reference:
+             keys = ("fdr_threshold", "minimum_abs_lfc", "lfc_epsilon", "state_scale", "magnitude_scale", "magnitude_clip")
+             reference = build_de_state_reference(pools, group["control_label"], list(group["conditions"]),
+                                                 **{k: de_cfg[k] for k in keys}, **reference_args)
+@@ -128,11 +137,12 @@ class JointObjective(torch.nn.Module):
+ 
+     def __init__(self, config, data):
+         super().__init__()
+-        if set(config) - {"factory", "state", "pds_contrastive", "de_mmd"}:
+-            raise ValueError("Joint loss supports only state, pds_contrastive and de_mmd settings")
++        if set(config) - {"factory", "state", "pds_contrastive", "de_mmd", "de_shrink"}:
++            raise ValueError("Joint loss supports only state, pds_contrastive, de_mmd and de_shrink settings")
+         self.config = {"losses": config}
+         self.gene_count = len(data.spec["gene_names"])
+         self.pds_cfg, self.de_cfg = config["pds_contrastive"], config["de_mmd"]
++        self.shrink_cfg = config.get("de_shrink", {})
+         weights = loss_weights_at_step(self.config, 10**12)
+         if any(not math.isfinite(v) or v < 0 for v in weights.values()) or not any(weights.values()):
+             raise ValueError("Loss weights must be finite/nonnegative and at least one must be positive")
+@@ -153,10 +163,11 @@ def __init__(self, config, data):
+         self.reference_keys = {}
+         for split in ("train", "validation"):
+             for group_name, group in data.references(split).items():
+-                if weights["pds"] or weights["de_mmd"] or group.get("gene_mask") is not None:
++                if weights["pds"] or weights["de_mmd"] or self.shrink_cfg or group.get("gene_mask") is not None:
+                     key = f"group_{len(self.references)}"
+                     self.reference_keys[(split, group_name)] = key
+-                    self.references[key] = _References(group, self.target_sum, self.pds_cfg, self.de_cfg)
++                    self.references[key] = _References(group, self.target_sum, self.pds_cfg, self.de_cfg,
++                                                       need_de_reference=bool(self.shrink_cfg))
+         if weights["de_mmd"]:
+             if data.gene_embeddings is None or data.gene_embeddings.shape[0] != self.gene_count:
+                 raise ValueError("DE loss requires gene embeddings in data gene order")
+@@ -167,11 +178,16 @@ def __init__(self, config, data):
+ 
+     def forward(self, prediction, batch, *, split, step):
+         weights = loss_weights_at_step(self.config, step)
++        # weight 0이어도 설정에 항이 있으면 detach해서 기록한다.
++        need_shrink = bool(weights["de_shrink"] or self.shrink_cfg)
++        # de_shrink도 control을 읽는다. pds와 de_mmd가 꺼져 있을 때 control 검증과 마스킹을 건너뛰면
++        # 미측정 gene이 control의 CP 정규화에 섞여 측정 gene의 control lfc 기준이 달라진다.
++        need_control = bool(weights["pds"] or weights["de_mmd"] or need_shrink)
+         _validate_set_tensor(prediction, batch, "prediction", self.gene_count)
+         if weights["state"]:
+             _require_counts(batch.get("target_units", batch.get("units", "raw_counts")), "STATE target")
+             _validate_set_tensor(batch["target"], batch, "STATE target", self.gene_count)
+-        if weights["pds"] or weights["de_mmd"]:
++        if need_control:
+             _require_counts(batch.get("units", "raw_counts"), "PDS/DE control")
+             _validate_set_tensor(batch["inputs"]["ctrl_cell_emb"], batch, "PDS/DE control", self.gene_count)
+         mask, reference, labels = None, None, None
+@@ -194,13 +210,14 @@ def forward(self, prediction, batch, *, split, step):
+             prediction = prediction * mask[:, None, :]
+             if weights["state"]:
+                 target_counts = target_counts * mask[:, None, :]
+-            if weights["pds"] or weights["de_mmd"]:
++            if need_control:
+                 control_counts = control_counts * mask[:, None, :]
+         zero = prediction.new_zeros(())
+-        need_log = self.space == "log1p_cp" or (weights["pds"] and self.pds_space == "cell_log1p") or weights["de_mmd"]
++        need_log = (self.space == "log1p_cp" or (weights["pds"] and self.pds_space == "cell_log1p")
++                    or weights["de_mmd"] or need_shrink)
+         prediction_log = control_log = None
+         if need_log:
+-            if weights["pds"] or weights["de_mmd"]:
++            if need_control:
+                 control_log = counts_to_log1p_cp_torch(control_counts, self.target_sum)
+             prediction_log = counts_to_log1p_cp_torch(prediction, self.target_sum)
+         if weights["state"]:
+@@ -211,7 +228,7 @@ def forward(self, prediction, batch, *, split, step):
+             state = self.energy(state_prediction, target).mean()
+         else:
+             state = zero
+-        pds = de = zero
++        pds = de = shrink = zero
+         components = {"state": state}
+         if weights["pds"] or weights["de_mmd"]:
+             if weights["pds"]:
+@@ -226,8 +243,26 @@ def forward(self, prediction, batch, *, split, step):
+                                   pds_hardest_negative_margin=result.hardest_negative_margin)
+             if weights["de_mmd"]:
+                 de = self.de_loss(prediction_log, control_log, reference.de[labels], observed_mask=mask)
++        if need_shrink:
++            de_reference = None if reference is None else getattr(reference, "de", None)
++            if de_reference is None:
++                raise ValueError("de_shrink requires DE references for the batch group")
++            features = de_reference[labels]
++            # 유의 gene 집합은 참조 상태의 up/down 질량이다. 미측정 gene은 참조에서 유의가 될 수 없다.
++            significant = (features[..., 1] + features[..., 2]) > 0
++            shrink, shrink_significant = de_shrink_loss(
++                prediction_log if weights["de_shrink"] else prediction_log.detach(),
++                control_log,
++                significant,
++                lfc_epsilon=float(self.shrink_cfg.get("lfc_epsilon", self.de_cfg["lfc_epsilon"])),
++                observed_mask=mask,
++                minimum_significant_genes=int(self.shrink_cfg.get("minimum_significant_genes", 10)),
++            )
++            components["de_shrink"] = shrink
++            components["de_shrink_significant_magnitude"] = shrink_significant
+         components.update(pds=pds, de_mmd=de)
+-        return weights["state"] * state + weights["pds"] * pds + weights["de_mmd"] * de, components
++        return (weights["state"] * state + weights["pds"] * pds + weights["de_mmd"] * de
++                + weights["de_shrink"] * shrink), components
+ 
+ 
+ def build_objective(config, data):

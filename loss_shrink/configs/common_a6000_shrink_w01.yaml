@@ -1,0 +1,116 @@
+# L_SHRINK(de_shrink weight 0.1)를 팀 공통 A6000 비교 모델에 붙인 설정 (2026-09-24).
+# 팀 공통 config에서 바꾼 곳은 losses.de_shrink 추가와 output.root뿐이다.
+# 기준 런(baseline)은 losses.de_shrink 블록만 뺀 같은 파일이고,
+# 두 번째 seed는 training.seed만 20260921로 바꿨다.
+data:
+  input_h5ad: ${VCC_DATA_ROOT}/virtual-cell-challenge/2025/train/adata_Training.h5ad
+  target_column: target_gene
+  control_label: non-targeting
+  perturbations: all
+  train_cells_per_condition: all_available_after_validation
+  validation_cells_per_condition: 64
+  minimum_train_cells_per_condition: 16
+  minimum_validation_cells_per_condition: 16
+  sparse_perturbation_policy: adaptive
+  factory: data_adapters.h1:build_data
+  cell_set_len: 16
+  loading_mode: backed
+  loading_chunk_rows: 256
+  prepare_gene_embeddings: true
+  counts_target_sum: 10000.0
+  shared_controls_per_panel: true
+  evaluation_repeats: 1
+  gene_embeddings:
+    cache_path: ${VCC_ESM2_CACHE}
+    expected_sha256: a210e1cc7901513999b2bca3836ba9e2f203cd008be4e9a9d6412a2267de9748
+    source_embedding_dim: 5120
+    projection_dim: 64
+    projection_seed: 20260902
+    projection_chunk_size: 512
+    perturbation_aliases:
+      TAZ: TAFAZZIN
+model:
+  hidden_dim: 2048
+  intermediate_dim: 8192
+  num_hidden_layers: 4
+  num_attention_heads: 32
+  n_encoder_layers: 1
+  n_decoder_layers: 1
+  encoder_output_layer_norm: true
+  encoder_layer_norm_eps: 1.0e-06
+  output_activation: softplus
+  softplus_beta: 0.5
+  softplus_threshold: 20.0
+  dropout: 0.1
+  factory: model_adapters.standard_io:build_model
+  source_repo: third_party/state
+  bottleneck_mode: residual_only
+  basal_encoder_input: raw
+  residual_space: count
+  counts_target_sum: 10000.0
+losses:
+  state:
+    weight: 0.01
+    space: raw_counts
+  pds_contrastive:
+    weight: 0.5
+    start_step: 0
+    warmup_steps: 0
+    temperature: 0.1
+    counts_target_sum: 10000.0
+    space: cell_log1p
+    bulk_target_sum: 50000.0
+  de_mmd:
+    weight: 4.0
+    start_step: 0
+    warmup_steps: 0
+    fdr_threshold: 0.05
+    minimum_abs_lfc: 0.25
+    lfc_epsilon: 0.001
+    significance_temperature: 0.1
+    direction_temperature: 0.25
+    gene_embedding_scale: 1.0
+    state_scale: 1.0
+    magnitude_scale: 0.25
+    magnitude_clip: 5.0
+    kernel_bandwidths: [0.5, 1.0, 2.0, 4.0]
+    rff_features_per_bandwidth: 16
+    rff_seed: 20260903
+    class_mass_weight: 1.0
+  # 실측 유의 집합 S_p 밖 측정 gene의 예측 |lfc| 평균을 누른다. S_p는 de_mmd의
+  # fdr_threshold, minimum_abs_lfc로 만든 DE 참조에서 온다. GWPS zero-shot 실험과 같은 값이다.
+  de_shrink:
+    weight: 0.1
+    minimum_significant_genes: 10
+    start_step: 0
+    warmup_steps: 0
+  factory: training.objective:build_objective
+training:
+  seed: 20260901
+  steps: 2400
+  evaluation_interval: 100
+  panel_size: 4
+  gradient_accumulation_steps: 16
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  gradient_clip_norm: 10.0
+  device: auto
+  save_final_checkpoint: true
+  prefetch_batches: 2
+  checkpoint_interval: 400
+  matmul_precision: highest
+  wandb:
+    mode: disabled
+    project: vcc-training
+    entity: null
+evaluation:
+  factory: evaluation.vcc2026:build_evaluator
+  enabled: true
+  interval: 400
+  de_backend: pdex
+  device: cpu
+  num_threads: 4
+  integerization: stochastic_round
+  integerization_seed: 20260905
+output:
+  root: ${WORKDIR}/vcc-checkpoints

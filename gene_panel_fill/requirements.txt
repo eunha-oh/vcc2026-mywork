@@ -1,0 +1,8 @@
+numpy==2.5.3
+pandas==3.0.6
+scipy==1.18.1
+anndata==0.13.4
+h5py==3.16.0
+scikit-learn==1.9.1
+pyarrow==25.0.1
+torch==2.8.0

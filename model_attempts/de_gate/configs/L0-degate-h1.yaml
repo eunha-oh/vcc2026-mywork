@@ -1,0 +1,144 @@
+# L0-degate, fold h1: L0-h1 (main B2-prior 재현 설정) 에 DE 게이트(A)만 더한 설정
+# L0-h1.yaml 을 복사해 model.factory, model.de_gate, losses.factory, losses.de_gate 만 바꿨다. 나머지 학습 조건은 같다.
+# 제출 단계 table(panel_C05sup07)과 gain 2.48 은 바꾸지 않는다 (experiments/prior_cd4t/make_submission.sh).
+# Env: VCC_PERT_TABLE, VCC_GENE_AXIS_CSV, VCC_H1_TRAIN_H5AD, VCC_ESM2_CACHE, VCC_GWPS_H5AD, VCC_GWPS_COUNTS_CACHE, VCC_GENE_GRAPHS, VCC_RUNS_ROOT
+# Run: python scripts/train.py --config configs/txpert_exp/L0-degate-h1.yaml --output-root ${VCC_RUNS_ROOT}/b2prior/L0-degate-h1
+data:
+  factory: data_adapters.pert_prior:build_data
+  base_factory: data_adapters.multi:build_data
+  pert_prior:
+    path: ${VCC_PERT_TABLE}
+    min_cells: 16
+    exclude_lines:
+      gwps:
+      - replogle_k562_gwps
+  validation_cells_per_condition: 64
+  minimum_train_cells_per_condition: 16
+  minimum_validation_cells_per_condition: 16
+  min_cells_per_condition: 32
+  sparse_perturbation_policy: adaptive
+  cell_set_len: 16
+  loading_mode: backed
+  loading_chunk_rows: 256
+  prepare_gene_embeddings: true
+  counts_target_sum: 10000.0
+  shared_controls_per_panel: true
+  evaluation_repeats: 1
+  key_mode: composite
+  missing_perturbation_embeddings: drop
+  gene_axis_csv: ${VCC_GENE_AXIS_CSV}
+  axis_reference_h5ad: ${VCC_H1_TRAIN_H5AD}
+  gene_embeddings:
+    cache_path: ${VCC_ESM2_CACHE}
+    expected_sha256: a210e1cc7901513999b2bca3836ba9e2f203cd008be4e9a9d6412a2267de9748
+    source_embedding_dim: 5120
+    projection_dim: 64
+    projection_seed: 20260902
+    projection_chunk_size: 512
+    perturbation_aliases:
+      TAZ: TAFAZZIN
+    imputation_cells_per_condition: 16
+    perturbation_aliases_csv: configs/gwps_esm2_symbol_aliases.csv
+  datasets:
+  - name: gwps
+    adapter: perturbseq_dense
+    path: ${VCC_GWPS_H5AD}
+    counts_cache: ${VCC_GWPS_COUNTS_CACHE}
+    cell_line: K562
+    role: both
+    thin_rate: null
+    seed: 0
+model:
+  factory: model_adapters.txpert_degate:build_model
+  de_gate:
+    enabled: true
+    mode: soft_norm
+    hard_threshold: 0.5
+    bias_init: -1.9
+    measured_path: ${VCC_DATA_ROOT}/derived/de-gate-eunha/measured_k562_gwps.npy
+  latent_dim: 64
+  hidden_dim: 512
+  dropout: 0.1
+  counts_target_sum: 10000.0
+  esm2_cache: ${VCC_ESM2_CACHE}
+  esm2_sha256: a210e1cc7901513999b2bca3836ba9e2f203cd008be4e9a9d6412a2267de9748
+  gene_aliases:
+    TAZ: TAFAZZIN
+  graph_dir: ${VCC_GENE_GRAPHS}
+  graph: string_top20
+  pert_prior: true
+  pert_prior_gain_init: 1.0
+  pert_prior_gain_trainable: true
+losses:
+  state:
+    weight: 0.01
+    space: raw_counts
+  pds_contrastive:
+    weight: 0.5
+    start_step: 0
+    warmup_steps: 0
+    temperature: 0.1
+    counts_target_sum: 10000.0
+    space: bulk_lognorm
+    bulk_target_sum: 50000.0
+  de_mmd:
+    weight: 4.0
+    start_step: 0
+    warmup_steps: 0
+    fdr_threshold: 0.05
+    minimum_abs_lfc: 0.25
+    lfc_epsilon: 0.001
+    significance_temperature: 0.1
+    direction_temperature: 0.25
+    gene_embedding_scale: 1.0
+    state_scale: 1.0
+    magnitude_scale: 0.25
+    magnitude_clip: 5.0
+    kernel_bandwidths:
+    - 0.5
+    - 1.0
+    - 2.0
+    - 4.0
+    rff_features_per_bandwidth: 16
+    rff_seed: 20260903
+    class_mass_weight: 1.0
+  factory: training.degate_objective:build_objective
+  de_gate:
+    weight: 1.0
+    pos_weight: 1.0
+    labels_path: ${VCC_DATA_ROOT}/derived/de-gate-eunha/de_labels/de_labels_k562_gwps.npz
+training:
+  seed: 20260901
+  steps: 3000
+  evaluation_interval: 1000
+  panel_size: 16
+  gradient_accumulation_steps: 4
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  gradient_clip_norm: 10.0
+  device: auto
+  save_final_checkpoint: true
+  prefetch_batches: 2
+  checkpoint_interval: 1000
+  matmul_precision: highest
+  wandb:
+    mode: online
+    project: virtual-cell-challenge-kubig
+    entity: KUBIG-VCC
+    group: txpert-exp
+    name: eunha - L0 degate h1
+    tags:
+    - exp:L0-degate
+    - fold:h1
+evaluation:
+  factory: evaluation.vcc2026:build_evaluator
+  enabled: false
+  interval: 400
+  de_backend: pdex
+  device: cpu
+  num_threads: 4
+  integerization: stochastic_round
+  integerization_seed: 20260905
+output:
+  root: ${VCC_RUNS_ROOT}/b2prior/L0-degate-h1
+  experiment: run
